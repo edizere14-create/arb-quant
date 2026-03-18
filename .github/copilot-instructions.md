@@ -10,6 +10,30 @@ profitable after fees, MEV exposure, and smart contract risk — not just on pap
 
 ---
 
+## 0. Profitable DeFi Investor Objectives
+
+**Primary Goal:** Build a portfolio delivering net Sharpe ≥ 1.0, max drawdown ≤ 20%,
+outperforming ETH or USDC on Arbitrum by 5% risk-adjusted annually.
+
+**Portfolio Rules:**
+- Max 30% capital per strategy; correlated strategies (corr > 0.7) share one bucket
+- Position sizing: 0.25–0.5× Kelly or volatility-scaled; portfolio CVaR ≤ 5%
+- Live tracking required — rolling Sharpe, expectancy, fee/PnL ratio:
+  - Sharpe < 0.5 over 60d → reduce size or pause
+  - fee/PnL ratio > 40% → retire the strategy immediately
+- Compare live vs. backtest results monthly; all divergences must be explained
+- User profile: `[conservative / moderate / aggressive]` · `[horizon]` · DD tolerance `[X%]`
+  — set this explicitly before deploying capital; all sizing scales from it
+- Always net out tax drag (qualitative) and operational overhead; prefer 3–5
+  high-conviction strategies over 20 micro-edges
+- Strategy Graveyard: log all failures. No strategy may be redeployed without
+  documenting and addressing the root cause of failure
+
+**Gate Every Idea:** If backtest Sharpe < 0.5 OR max drawdown > 30% → label
+`⚠️ RESEARCH ONLY — NOT DEPLOYABLE` and do not proceed to live sizing.
+
+---
+
 ## 1. Arbitrum Infrastructure (Always Apply)
 
 - **Sequencer:** Account for Nitro batch submission costs, L1 calldata pricing,
@@ -116,6 +140,10 @@ Apply this to **every** strategy or code request before responding:
    (`./strategy-framework.md` §4 — 9-point weighted checklist; minimum score 7/9 to deploy).
 7. **Backtest Architecture** — State lookback period, walk-forward window,
    and transaction cost model before writing any code.
+8. **Portfolio Fit** — Does this strategy fit within the remaining capital budget
+   (max 30% per strategy)? What is its correlation with all currently active
+   strategies? If corr > 0.7 with an existing strategy, they share one bucket.
+   Update the allocation table in the response before recommending deployment.
 
 ---
 
@@ -151,13 +179,23 @@ Apply this to **every** strategy or code request before responding:
 | Smart contract    | High   | Audit status + TVL trend check (see framework)  |
 | MEV / Frontrun    | High   | Private RPC mandatory above threshold            |
 
-### V. Kill Switches
+### V. Portfolio Allocation
+
+| Strategy | % Portfolio | Corr with Active | Expected Sharpe | Go/No-Go |
+|----------|-------------|------------------|-----------------|----------|
+| [This]   | X%          | [vs. each active]| Y               | GO / NO  |
+
+- Flag if adding this strategy pushes any bucket above 30% of total capital
+- Flag if portfolio CVaR exceeds 5% after inclusion
+- If `NO-GO`: state which constraint failed and what would need to change
+
+### VI. Kill Switches
 - Define hard stop conditions before any capital is deployed:
   - Max drawdown threshold (default: -15% in 24h → halt)
   - Oracle divergence threshold (default: > 2% Pyth vs. Chainlink → halt)
   - Sequencer downtime detection → pause all open positions
 
-### VI. MVP Path
+### VII. MVP Path
 - Fastest route to paper-trading:
   ```bash
   anvil --fork-url https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY --fork-block-number LATEST
