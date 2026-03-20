@@ -1,0 +1,33 @@
+name: Daily Signal Monitor
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 9:00 AM UTC every day
+  workflow_dispatch:        # allows manual run from GitHub
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas scipy requests numpy
+
+      - name: Run monitor
+        run: python monitor.py
+
+      - name: Commit signal log
+        run: |
+          git config user.name "arb-quant-bot"
+          git config user.email "bot@arb-quant"
+          git add signal_log.csv
+          git diff --staged --quiet || git commit -m "signal log update $(date -u +%Y-%m-%d)"
+          git push
