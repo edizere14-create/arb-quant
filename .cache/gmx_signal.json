@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-03-22 02:53 UTC",
+  "market": "ETH",
+  "decision": "NO SIGNAL",
+  "spread": {
+    "gross_spread_bps": 0.1052,
+    "net_spread_bps": -8.0948,
+    "annual_pct": 1.1519,
+    "viable": false,
+    "gmx_rate_8h": 0.0,
+    "cex_rate_8h": -0.001052
+  },
+  "fee_drag": {
+    "gross_return_usd": 0.0,
+    "total_cost_usd": 1.95,
+    "net_return_usd": -1.95,
+    "net_return_pct": -0.39,
+    "viable": false
+  },
+  "gmx_rate": {
+    "rate_8h": 0.0,
+    "rate_annual": 0.0,
+    "source": "gmx-v2",
+    "market": "ETH"
+  },
+  "cex_rate": {
+    "rate_8h": -0.001052,
+    "rate_annual": -1.1519,
+    "source": "binance"
+  }
+}
