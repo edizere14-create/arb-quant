@@ -3,15 +3,20 @@ name: Daily Signal Monitor
 on:
   schedule:
     - cron: '0 9 * * *'   # 9:00 AM UTC every day
-  workflow_dispatch:        # allows manual run from GitHub
+  workflow_dispatch:        # allows manual run from GitHub UI
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write       # required to push signal_log.csv back
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,10 +29,10 @@ jobs:
       - name: Run monitor
         run: python monitor.py
 
-      - name: Commit signal log
+      - name: Commit updated signal log
         run: |
           git config user.name "arb-quant-bot"
-          git config user.email "bot@arb-quant"
-          git add signal_log.csv
-          git diff --staged --quiet || git commit -m "signal log update $(date -u +%Y-%m-%d)"
+          git config user.email "bot@arb-quant.local"
+          git add signal_log.csv positions.json || true
+          git diff --staged --quiet || git commit -m "signal log $(date -u +%Y-%m-%d)"
           git push

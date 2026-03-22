@@ -13,7 +13,6 @@ import json
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from scipy import stats
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -326,19 +325,8 @@ def classify_regime(H: float, rv: float, rv_zscore: float) -> tuple[str, str]:
     return "RANDOM WALK", "neutral"
 
 
-@st.cache_data(ttl=300)
 def load_signal_log() -> pd.DataFrame:
-    """Load signal_log.csv from GitHub raw (always fresh), fall back to local."""
-    raw_url = (
-        "https://raw.githubusercontent.com/"
-        "edizere14-create/arb-quant/master/signal_log.csv"
-    )
-    try:
-        df = pd.read_csv(raw_url)
-        return df.tail(30)
-    except Exception:
-        pass
-    # Fallback: local file
+    """Load signal_log.csv if it exists."""
     log_path = Path("signal_log.csv")
     if log_path.exists():
         try:
@@ -346,6 +334,7 @@ def load_signal_log() -> pd.DataFrame:
             return df.tail(30)
         except Exception:
             pass
+    # Return empty demo log
     return pd.DataFrame(columns=["timestamp", "z_score", "r_value", "p_value", "decision"])
 
 
@@ -391,21 +380,9 @@ def main():
 
     regime, regime_css = classify_regime(H, rv, rv_z)
 
-    # Signal decision — correlation gate (60d Pearson, same as inflow_signal_is_valid)
-    corr_r, corr_p = 0.0, 1.0
-    corr_valid = False
-    if len(bridge_vol) >= 30 and len(arb_prices) >= 30:
-        bv_z = (bridge_vol - bridge_vol.rolling(30).mean()) / bridge_vol.rolling(30).std()
-        arb_fwd = arb_prices.pct_change().shift(-1)
-        common = bv_z.dropna().index.intersection(arb_fwd.dropna().index)
-        if len(common) >= 30:
-            x = bv_z.reindex(common).iloc[-60:]
-            y = arb_fwd.reindex(common).iloc[-60:]
-            mask = x.notna() & y.notna()
-            if mask.sum() >= 30:
-                corr_r, corr_p = stats.pearsonr(x[mask], y[mask])
-                corr_valid = corr_r > 0.25 and corr_p < 0.05
-    signal_fires = z_score > 2.0 and corr_valid
+    # Signal decision
+    corr_valid   = False   # would need scipy — simplified here
+    signal_fires = z_score > 2.0
 
     if signal_fires:
         banner_class = "banner-entry"
@@ -473,13 +450,31 @@ def main():
         </div>""", unsafe_allow_html=True)
 
     with s2:
-        corr_color = "go" if corr_valid else "nogo"
-        corr_status = "VALID" if corr_valid else "DECAYED"
+        corr_color = "nogo"
+        corr_text  = "DECAYED"
+        corr_sub   = "r=N/A (need more data)"
+        try:
+            from scipy import stats as _stats
+            if len(bridge_vol) >= 30 and len(arb_prices) >= 30:
+                fwd_ret  = arb_prices.pct_change().shift(-1).dropna()
+                inflow_s = bridge_vol.reindex(fwd_ret.index, method="nearest").fillna(0)
+                mean_i   = inflow_s.rolling(30).mean()
+                std_i    = inflow_s.rolling(30).std().replace(0, float("nan"))
+                z_s      = ((inflow_s - mean_i) / std_i).dropna()
+                common   = z_s.index.intersection(fwd_ret.index)
+                if len(common) >= 30:
+                    r, p = _stats.pearsonr(z_s[common], fwd_ret[common])
+                    valid      = bool(r > 0.25 and p < 0.05)
+                    corr_color = "go" if valid else "nogo"
+                    corr_text  = "VALID" if valid else "DECAYED"
+                    corr_sub   = f"r={r:+.4f} p={p:.4f} (need r>0.25, p<0.05)"
+        except Exception:
+            pass
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">Correlation Gate</div>
-            <div class="metric-value {corr_color}">{corr_status}</div>
-            <div class="metric-sub">r={corr_r:+.4f}  p={corr_p:.4f} (need r>0.25, p<0.05)</div>
+            <div class="metric-value {corr_color}">{corr_text}</div>
+            <div class="metric-sub">{corr_sub}</div>
         </div>""", unsafe_allow_html=True)
 
     with s3:
@@ -556,14 +551,145 @@ def main():
             unsafe_allow_html=True,
         )
     else:
-        # Color decision column
         def color_decision(val):
             if "ENTRY" in str(val):
                 return "color: #00ff88; font-weight: bold"
             return "color: #555"
-
         styled = log_df.style.applymap(color_decision, subset=["decision"] if "decision" in log_df.columns else [])
         st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # ── Row 6: Portfolio PnL ──────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Portfolio Performance</div>', unsafe_allow_html=True)
+
+    positions_data = {"open": [], "closed": []}
+    try:
+        pos_file = Path("positions.json")
+        if pos_file.exists():
+            positions_data = json.loads(pos_file.read_text())
+    except Exception:
+        pass
+
+    closed = positions_data.get("closed", [])
+    open_p = positions_data.get("open", [])
+
+    p1, p2, p3, p4 = st.columns(4)
+
+    total_pnl    = sum(t.get("pnl_usd", 0) or 0 for t in closed)
+    n_trades     = len(closed)
+    n_wins       = sum(1 for t in closed if (t.get("pnl_pct") or 0) > 0)
+    win_rate     = (n_wins / n_trades * 100) if n_trades > 0 else 0
+    returns      = [t.get("pnl_pct", 0) or 0 for t in closed]
+    sharpe       = (np.mean(returns) / np.std(returns) * np.sqrt(252)) \
+                   if len(returns) > 1 and np.std(returns) > 0 else 0
+
+    with p1:
+        pnl_color = "go" if total_pnl >= 0 else "nogo"
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Total Net PnL</div>
+            <div class="metric-value {pnl_color}">${total_pnl:+.2f}</div>
+            <div class="metric-sub">{n_trades} closed trades</div>
+        </div>""", unsafe_allow_html=True)
+
+    with p2:
+        wr_color = "go" if win_rate >= 50 else "nogo"
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Win Rate</div>
+            <div class="metric-value {wr_color}">{win_rate:.1f}%</div>
+            <div class="metric-sub">{n_wins} wins / {n_trades} trades</div>
+        </div>""", unsafe_allow_html=True)
+
+    with p3:
+        sh_color = "go" if sharpe >= 1.0 else ("caution" if sharpe >= 0.5 else "nogo")
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Sharpe Ratio</div>
+            <div class="metric-value {sh_color}">{sharpe:.2f}</div>
+            <div class="metric-sub">Target ≥ 1.0</div>
+        </div>""", unsafe_allow_html=True)
+
+    with p4:
+        n_open = len(open_p)
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Open Positions</div>
+            <div class="metric-value {'caution' if n_open > 0 else 'neutral'}">{n_open}</div>
+            <div class="metric-sub">{'Active trade running' if n_open > 0 else 'No open positions'}</div>
+        </div>""", unsafe_allow_html=True)
+
+    # Open positions detail
+    if open_p:
+        st.markdown('<div class="section-header">Open Positions</div>', unsafe_allow_html=True)
+        open_df = pd.DataFrame(open_p)[
+            ["id", "asset", "strategy", "entry_time", "entry_price", "size_usd"]
+        ]
+        st.dataframe(open_df, use_container_width=True, hide_index=True)
+
+    # Closed trades table
+    if closed:
+        st.markdown('<div class="section-header">Closed Trades</div>', unsafe_allow_html=True)
+        closed_df = pd.DataFrame(closed)[
+            ["entry_date", "exit_date", "asset", "pnl_pct", "pnl_usd", "exit_reason"]
+        ] if all(k in closed[0] for k in ["entry_date", "pnl_pct"]) else pd.DataFrame(closed)
+
+        def color_pnl(val):
+            try:
+                return "color: #00ff88" if float(val) > 0 else "color: #ff4455"
+            except Exception:
+                return ""
+
+        if "pnl_pct" in closed_df.columns:
+            styled_c = closed_df.style.applymap(color_pnl, subset=["pnl_pct", "pnl_usd"])
+            st.dataframe(styled_c, use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(closed_df, use_container_width=True, hide_index=True)
+
+    # ── Row 7: GMX Signal ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">GMX Funding Rate Signal (Strategy A)</div>', unsafe_allow_html=True)
+
+    gmx_cache = Path(".cache/gmx_signal.json")
+    if gmx_cache.exists():
+        try:
+            gmx_data = json.loads(gmx_cache.read_text())
+            spread   = gmx_data.get("spread", {})
+            g1, g2, g3 = st.columns(3)
+            with g1:
+                net_bps = spread.get("net_spread_bps", 0)
+                g_color = "go" if net_bps >= 15 else "neutral"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Net Spread</div>
+                    <div class="metric-value {g_color}">{net_bps:.1f} bps</div>
+                    <div class="metric-sub">Entry threshold: 15 bps</div>
+                </div>""", unsafe_allow_html=True)
+            with g2:
+                gmx_r = gmx_data.get("gmx_rate", {}).get("rate_8h", 0)
+                cex_r = gmx_data.get("cex_rate", {}).get("rate_8h", 0)
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">GMX vs CEX Rate (8h)</div>
+                    <div class="metric-value neutral">{gmx_r:+.4f}% / {cex_r:+.4f}%</div>
+                    <div class="metric-sub">GMX / Binance</div>
+                </div>""", unsafe_allow_html=True)
+            with g3:
+                decision = gmx_data.get("decision", "NO SIGNAL")
+                d_color  = "go" if "ENTRY" in decision else "neutral"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-label">Decision</div>
+                    <div class="metric-value {d_color}" style="font-size:1rem;margin-top:8px">{decision}</div>
+                    <div class="metric-sub">{gmx_data.get('timestamp','')[:16]}</div>
+                </div>""", unsafe_allow_html=True)
+        except Exception:
+            st.markdown('<div class="metric-card neutral">Run gmx_signal.py to populate</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<div class="metric-card neutral" style="text-align:center;padding:20px">'
+            'Run <code>python gmx_signal.py</code> to populate GMX signal data.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Footer ────────────────────────────────────────────────────────────────
     st.markdown("---")

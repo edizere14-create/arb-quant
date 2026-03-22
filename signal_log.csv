@@ -2,3 +2,5 @@ timestamp,z_score,pearson_r,p_value,corr_valid,entry_signal,decision
 2026-03-18 00:21:48 UTC,-1.0960,-0.3390,0.0081,False,False,PARKED
 2026-03-18 00:51:08 UTC,-1.0960,-0.3390,0.0081,False,False,PARKED
 2026-03-18 00:51:12 UTC,-1.0960,-0.3390,0.0081,False,False,PARKED
+2026-03-20 05:29:38 UTC,-1.7477,-0.2754,0.0332,False,False,PARKED
+2026-03-20 05:31:01 UTC,-1.7477,-0.2754,0.0332,False,False,PARKED
