@@ -331,7 +331,7 @@ def load_signal_log() -> pd.DataFrame:
     """Load signal_log.csv from GitHub raw (always fresh), fall back to local."""
     raw_url = (
         "https://raw.githubusercontent.com/"
-        "edizere14-create/arb-quant/main/signal_log.csv"
+        "edizere14-create/arb-quant/master/signal_log.csv"
     )
     try:
         df = pd.read_csv(raw_url)
