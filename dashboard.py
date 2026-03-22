@@ -326,8 +326,19 @@ def classify_regime(H: float, rv: float, rv_zscore: float) -> tuple[str, str]:
     return "RANDOM WALK", "neutral"
 
 
+@st.cache_data(ttl=300)
 def load_signal_log() -> pd.DataFrame:
-    """Load signal_log.csv if it exists."""
+    """Load signal_log.csv from GitHub raw (always fresh), fall back to local."""
+    raw_url = (
+        "https://raw.githubusercontent.com/"
+        "edizere14-create/arb-quant/main/signal_log.csv"
+    )
+    try:
+        df = pd.read_csv(raw_url)
+        return df.tail(30)
+    except Exception:
+        pass
+    # Fallback: local file
     log_path = Path("signal_log.csv")
     if log_path.exists():
         try:
@@ -335,7 +346,6 @@ def load_signal_log() -> pd.DataFrame:
             return df.tail(30)
         except Exception:
             pass
-    # Return empty demo log
     return pd.DataFrame(columns=["timestamp", "z_score", "r_value", "p_value", "decision"])
 
 
