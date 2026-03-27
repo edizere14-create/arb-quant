@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pandas scipy requests numpy
+        run: pip install pandas scipy requests numpy httpx web3 python-dotenv aiosqlite
 
       - name: Run monitor
         run: python monitor.py

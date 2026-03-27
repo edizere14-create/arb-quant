@@ -58,7 +58,7 @@ def fetch_bridge_volume() -> pd.Series:
     if data and isinstance(data, list) and len(data) > 10:
         s = pd.Series(
             [d.get("depositUSD", 0) for d in data],
-            index=pd.to_datetime([d.get("date", 0) for d in data], unit="s", utc=True)
+            index=pd.to_datetime([int(d.get("date", 0)) for d in data], unit="s", utc=True)
         ).sort_index()
         _cache_write("bridge_volume_arb", s)
         return s
@@ -72,7 +72,7 @@ def fetch_stablecoin_delta() -> pd.Series:
     if data and isinstance(data, list) and len(data) > 10:
         s = pd.Series(
             [d.get("totalCirculatingUSD", {}).get("peggedUSD", 0) for d in data],
-            index=pd.to_datetime([d.get("date", 0) for d in data], unit="s", utc=True)
+            index=pd.to_datetime([int(d.get("date", 0)) for d in data], unit="s", utc=True)
         ).sort_index()
         delta = s.diff().fillna(0)
         _cache_write("stablecoin_delta_arb", delta)
@@ -168,7 +168,11 @@ def run_bridge_signal(verbose: bool = True) -> dict:
         print(f"  Verdict:            {dual['verdict']}")
 
     fwd  = prices.pct_change().shift(-1).dropna()
-    z_s  = compute_zscore(bridge).reindex(fwd.index, method="nearest").dropna()
+    z_bridge = compute_zscore(bridge)
+    if len(z_bridge) > 0 and len(fwd) > 0 and z_bridge.index.dtype == fwd.index.dtype:
+        z_s = z_bridge.reindex(fwd.index, method="nearest").dropna()
+    else:
+        z_s = pd.Series(dtype=float)
     corr_valid, r, p = inflow_signal_is_valid(z_s, fwd)
 
     if verbose:
