@@ -15,6 +15,8 @@ import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
+from web3 import Web3
+
 from flashloan_check  import run_flashloan_surface_check
 from rugpull_check    import run_rugpull_check
 from route_optimizer  import estimate_direct_vs_aggregator
@@ -28,6 +30,91 @@ FLASHBOTS_RPC       = "https://rpc.flashbots.net/fast"
 PORTFOLIO_TOTAL_USD = 500.0
 MAX_STRATEGY_PCT    = 0.30
 STRATEGY_C_PROTOCOLS= ["uniswap-v3","gmx-v2"]
+
+# ── Uniswap V3 ARB/USDC Pool (0.05% fee tier, Arbitrum One) ──────────────────
+# token0 = ARB (18 dec), token1 = USDC (6 dec)
+ARB_USDC_V3_POOL = "0xcDa53B1F66614552F834cEeF361A8D12a0B8DaD8"
+_V3_POOL_ABI = [
+    {
+        "inputs": [],
+        "name": "slot0",
+        "outputs": [
+            {"name": "sqrtPriceX96", "type": "uint160"},
+            {"name": "tick", "type": "int24"},
+            {"name": "observationIndex", "type": "uint16"},
+            {"name": "observationCardinality", "type": "uint16"},
+            {"name": "observationCardinalityNext", "type": "uint16"},
+            {"name": "feeProtocol", "type": "uint8"},
+            {"name": "unlocked", "type": "bool"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "liquidity",
+        "outputs": [{"name": "", "type": "uint128"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+_DECIMALS_DIFF = 18 - 6  # ARB(18) − USDC(6) = 12
+
+
+def estimate_v3_slippage(position_size_usd: float) -> tuple[float, str]:
+    """Estimate slippage via Uniswap V3 ARB/USDC tick-based liquidity model.
+
+    Queries on-chain: slot0() → sqrtPriceX96, liquidity() → active L.
+    Computes:  Δprice = Δtoken / L   (per system-prompt §2).
+
+    Returns (slippage_pct, method):
+        method = "tick-based" | "fallback"
+        0.05 ≤ slippage_pct ≤ 2.0;  fallback = 0.15 on RPC failure.
+    """
+    try:
+        w3 = Web3(Web3.HTTPProvider(ARB_RPC))
+        if not w3.is_connected():
+            return 0.15, "fallback"
+
+        pool = w3.eth.contract(
+            address=Web3.to_checksum_address(ARB_USDC_V3_POOL),
+            abi=_V3_POOL_ABI,
+        )
+
+        slot0 = pool.functions.slot0().call()
+        sqrt_price_x96: int = slot0[0]
+        L: int = pool.functions.liquidity().call()
+
+        if L == 0 or sqrt_price_x96 == 0:
+            return 0.15, "fallback"
+
+        # ── Current price ─────────────────────────────────────────────────
+        # sqrtPriceX96 = sqrt(price_raw) × 2^96
+        # price_raw  = (sqrtPriceX96 / 2^96)²   (USDC_raw per ARB_raw)
+        # price_human = price_raw × 10^12        (USDC per ARB)
+        sqrt_price = sqrt_price_x96 / (2**96)
+        current_price = (sqrt_price**2) * (10**_DECIMALS_DIFF)
+
+        if current_price <= 0:
+            return 0.15, "fallback"
+
+        # ── Single-tick slippage approximation ────────────────────────────
+        # Buying ARB with USDC: push token1 (USDC) into pool
+        # Δ(sqrtPrice) = Δy_raw / L   where Δy_raw = position_usd × 10^6
+        delta_y = position_size_usd * (10**6)
+        delta_sqrt_price = delta_y / L
+
+        new_sqrt_price = sqrt_price + delta_sqrt_price
+        new_price = (new_sqrt_price**2) * (10**_DECIMALS_DIFF)
+
+        slippage_pct = abs(new_price - current_price) / current_price * 100
+
+        # Cap [0.05%, 2.0%]
+        slippage_pct = max(0.05, min(2.0, slippage_pct))
+        return round(slippage_pct, 4), "tick-based"
+
+    except Exception:
+        return 0.15, "fallback"
 
 def _rpc(url,method,params):
     try:
@@ -105,12 +192,14 @@ def gate_fee_drag(position_usd:float,expected_return_pct:float=0.25)->dict:
     gas_result=_rpc(ARB_RPC,"eth_gasPrice",[])
     gas_gwei=int(gas_result,16)/1e9 if gas_result else 0.1
     gas_usd=gas_gwei*300_000*1e-9*2000
-    protocol_fee=0.30; slippage=0.08
+    protocol_fee=0.30
+    slippage, slip_method = estimate_v3_slippage(position_usd)
     gas_pct=gas_usd/position_usd*100
     total=gas_pct+protocol_fee+slippage
     net=expected_return_pct-total
     passed=net>=0.05
-    detail=f"E[R]={expected_return_pct:.2f}% − costs={total:.2f}% = net {net:.2f}%"
+    detail=(f"E[R]={expected_return_pct:.2f}% − costs={total:.2f}% = net {net:.2f}% "
+            f"(slip={slippage:.4f}% [{slip_method}])")
     return _check("Fee drag viable (net>0.05%)",passed,detail)
 
 def gate_route(from_token:str,to_token:str,position_usd:float)->dict:
