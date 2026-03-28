@@ -78,6 +78,30 @@ SIGNAL_INTERVAL_S    = 60.0
 TRADE_LOCKOUT_S      = 300
 DEFAULT_ASSET        = "ARB"
 
+FNG_API_URL = "https://api.alternative.me/fng/?limit=1"
+
+
+async def fetch_fear_greed(client: httpx.AsyncClient) -> dict[str, object]:
+    """Fetch Crypto Fear & Greed Index. Returns {value, classification, risk_scaler}."""
+    try:
+        resp = await client.get(FNG_API_URL, timeout=10.0)
+        resp.raise_for_status()
+        entry = resp.json()["data"][0]
+        value = int(entry["value"])
+        classification = str(entry["value_classification"])
+    except Exception as exc:
+        logger.warning("F&G API failed: %s — defaulting to neutral", exc)
+        return {"value": 50, "classification": "Unavailable", "risk_scaler": 1.0}
+
+    if value < 25:
+        risk_scaler = 0.5
+    elif value > 75:
+        risk_scaler = 0.75
+    else:
+        risk_scaler = 1.0
+
+    return {"value": value, "classification": classification, "risk_scaler": risk_scaler}
+
 def _top_lead_lag_rows(raw: dict[str, object], limit: int = 3) -> list[str]:
     lead_lag = raw.get("lead_lag", {}) if isinstance(raw, dict) else {}
     corr_matrix = lead_lag.get("correlation_matrix", {}) if isinstance(lead_lag, dict) else {}
@@ -109,6 +133,7 @@ def _format_signal_message(
     position_usd: float,
     strategy_mode: str,
     risk_scaler: float,
+    fng_label: str,
     asset: str,
     side: str,
     passive: bool,
@@ -133,6 +158,7 @@ def _format_signal_message(
         f"Mode: `{_tg_escape(strategy_mode)}`\n"
         f"Size: `${_tg_escape(f'{position_usd:.2f}')}` \\({_tg_escape(f'{pos_pct:.1f}%')}\\)\n"
         f"Risk scaler: `{_tg_escape(f'{risk_scaler:.3f}')}`\n"
+        f"F\\&G: `{_tg_escape(fng_label)}`\n"
         f"Consensus: `{_tg_escape(f'{consensus:.4f}')}`\n"
         f"Bridge Z: `{_tg_escape(f'{bridge_z:.4f}')}`\n"
         f"Sentiment: `{_tg_escape(f'{sentiment_score:.4f}')}`\n"
@@ -388,6 +414,19 @@ async def signal_loop(
 
             size_usd = pos.position_usd
 
+            # ── Fear & Greed sentiment scaler ─────────────────────────────
+            fng = await fetch_fear_greed(client)
+            fng_value = int(fng["value"])
+            fng_cls = str(fng["classification"])
+            fng_scaler = float(fng["risk_scaler"])
+
+            size_usd *= fng_scaler
+            fng_label = f"{fng_cls} - {fng_value} (x{fng_scaler})"
+            logger.info(
+                "F&G: %d (%s) → risk_scaler=%.2f → adjusted size=$%.2f",
+                fng_value, fng_cls, fng_scaler, size_usd,
+            )
+
             # Fetch entry price from Pyth
             pair = ASSET_PAIR_MAP.get(asset, f"{asset}/USD")
             entry_price = await engine.get_latest_asset_price(pair) or 1.0
@@ -422,6 +461,7 @@ async def signal_loop(
                     position_usd=size_usd,
                     strategy_mode=pos.strategy_mode,
                     risk_scaler=pos.risk_scaler,
+                    fng_label=fng_label,
                     asset=asset,
                     side=side,
                     passive=True,
@@ -465,6 +505,7 @@ async def signal_loop(
                     position_usd=size_usd,
                     strategy_mode=pos.strategy_mode,
                     risk_scaler=pos.risk_scaler,
+                    fng_label=fng_label,
                     asset=asset,
                     side=side,
                     passive=False,

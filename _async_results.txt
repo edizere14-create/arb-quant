@@ -1,0 +1,6 @@
+1. AsyncWeb3 import: OK
+2. Async pool query: OK
+   sqrtPriceX96 = 23775567500066328597667
+   tick         = -300399
+   liquidity L  = 763584944496495116
+   ARB price    = $0.0901

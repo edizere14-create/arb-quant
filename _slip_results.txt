@@ -1,0 +1,7 @@
+=== V3 Tick-Based Slippage Test ===
+  $   50  ->  slippage = 0.0500%  [tick-based]
+  $  100  ->  slippage = 0.0873%  [tick-based]
+  $  250  ->  slippage = 0.2183%  [tick-based]
+  $  500  ->  slippage = 0.4369%  [tick-based]
+  $ 1000  ->  slippage = 0.8747%  [tick-based]
+=== Done ===

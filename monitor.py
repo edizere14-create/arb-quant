@@ -21,6 +21,7 @@ from bridge_signal  import run_bridge_signal
 from signal_scorer  import compute_signal_score, print_score
 from position_sizer import compute_position_size
 from circuit_breaker import run_circuit_breaker
+from data_fetcher   import fetch_lending_lead_sync
 
 LOG_FILE       = Path("signal_log.csv")
 POSITIONS_FILE = Path("positions.json")
@@ -31,7 +32,6 @@ ENTRY_Z      = 2.0
 EXIT_Z       = 0.5
 STOP_LOSS_PCT= -10.0
 TIME_STOP_H  = 6
-MIN_RADIANT_TVL = 1_000_000
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID","")
@@ -50,6 +50,20 @@ def send_telegram(msg:str)->None:
     except Exception as e:
         print(f"  [telegram] {e}")
 
+def fetch_fear_greed()->dict:
+    """Crypto Fear & Greed Index (advisory only, not a hard gate)."""
+    try:
+        data=_get("https://api.alternative.me/fng/?limit=1")
+        entry=data["data"][0]
+        value=int(entry["value"])
+        classification=entry["value_classification"]
+        if value<25:     bias="CONTRARIAN_ENTRY"
+        elif value>75:   bias="CONTRARIAN_EXIT"
+        else:            bias="NEUTRAL"
+        return {"value":value,"classification":classification,"bias":bias}
+    except Exception:
+        return {"value":-1,"classification":"UNAVAILABLE","bias":"NEUTRAL"}
+
 def fetch_arb_price()->float:
     try:
         data=_get("https://coins.llama.fi/prices/current/coingecko:arbitrum")
@@ -61,15 +75,6 @@ def fetch_eth_price()->float:
         data=_get("https://coins.llama.fi/prices/current/coingecko:ethereum")
         return float(data["coins"]["coingecko:ethereum"]["price"])
     except: return 2000.0
-
-def fetch_radiant_tvl()->float:
-    try:
-        data=_get("https://api.llama.fi/protocol/radiant-capital")
-        for k,v in (data.get("chainTvls") or {}).items():
-            if "arbitrum" in k.lower() and isinstance(v,list) and v:
-                return float(v[-1].get("totalLiquidityUSD",0))
-    except: pass
-    return 0.0
 
 def load_positions()->dict:
     if POSITIONS_FILE.exists():
@@ -111,10 +116,45 @@ def close_position(pos_id:str,exit_price:float,reason:str)->dict|None:
             return pos
     return None
 
-def log_signal(ts,z_b,z_s,r,p,cv,score,entry,decision)->None:
-    row=pd.DataFrame([{"timestamp":ts,"z_bridge":round(z_b,4),"z_stable":round(z_s,4),
+_LOG_COLUMNS = ["timestamp","z_score","pearson_r","p_value","corr_valid",
+                "entry_signal","decision","fng_value","fng_bias"]
+
+
+def _migrate_log_if_needed() -> None:
+    """If signal_log.csv has the old 7-column header, migrate to 9 columns."""
+    if not LOG_FILE.exists():
+        return
+    lines = LOG_FILE.read_text().strip().splitlines()
+    if not lines:
+        return
+    header = lines[0].split(",")
+    if header == _LOG_COLUMNS:
+        return  # already correct
+
+    new_lines = [",".join(_LOG_COLUMNS)]
+    for line in lines[1:]:
+        vals = line.split(",")
+        # Old 7-column rows: ts, z_score, pearson_r, p_value, corr_valid, entry_signal, decision
+        if len(vals) == 7:
+            new_lines.append(line + ",NA,NA")
+        # Malformed 11-value rows from broken writer:
+        # ts, z_bridge(0.0), z_stable(-0.4101), p(0.0), cv(1.0), F(alse), score(45),
+        # entry(False), decision(PARKED), fng_value(12), fng_bias(CONTRARIAN_ENTRY)
+        elif len(vals) == 11:
+            ts, _, _, _, _, _, _, entry, decision, fng_v, fng_b = vals
+            new_lines.append(f"{ts},NA,NA,NA,NA,{entry},{decision},{fng_v},{fng_b}")
+        else:
+            # Unknown format — skip
+            continue
+    LOG_FILE.write_text("\n".join(new_lines) + "\n")
+
+
+def log_signal(ts,z_b,r,p,cv,entry,decision,fng_value=-1,fng_bias="NEUTRAL")->None:
+    _migrate_log_if_needed()
+    row=pd.DataFrame([{"timestamp":ts,"z_score":round(z_b,4),
                         "pearson_r":round(r,4),"p_value":round(p,4),"corr_valid":cv,
-                        "signal_score":score,"entry_signal":entry,"decision":decision}])
+                        "entry_signal":entry,"decision":decision,
+                        "fng_value":fng_value,"fng_bias":fng_bias}])
     header=not LOG_FILE.exists()
     row.to_csv(LOG_FILE,mode="a",header=header,index=False)
 
@@ -126,6 +166,12 @@ def run_monitor():
     # ── Prices ────────────────────────────────────────────────────────────────
     eth_price=fetch_eth_price()
     arb_price=fetch_arb_price()
+
+    # ── Fear & Greed (advisory) ────────────────────────────────────────────────
+    fng=fetch_fear_greed()
+    fng_v=fng["value"]; fng_cls=fng["classification"]; fng_bias=fng["bias"]
+    bias_arrow="↑" if fng_bias=="CONTRARIAN_ENTRY" else "↓" if fng_bias=="CONTRARIAN_EXIT" else "→"
+    print(f"  [fear_greed] value={fng_v}, {fng_cls} {bias_arrow} {fng_bias} bias")
 
     # ── Bridge signal (dual source) ───────────────────────────────────────────
     sig=run_bridge_signal(verbose=False)
@@ -156,11 +202,10 @@ def run_monitor():
             print(f"  🔴 EXIT {pos['asset']} {closed['pnl_pct']:+.2f}% — {' | '.join(reasons)}")
             send_telegram(msg)
 
-    # ── Radiant TVL check ─────────────────────────────────────────────────────
-    radiant_tvl=fetch_radiant_tvl()
-    yield_rec="Radiant" if radiant_tvl>=MIN_RADIANT_TVL else "Aave V3"
-    if radiant_tvl<MIN_RADIANT_TVL:
-        print(f"  ⚠️  Radiant TVL ${radiant_tvl:,.0f} < ${MIN_RADIANT_TVL:,.0f} → switch to Aave")
+    # ── Lending lead (Aave V3 first, Radiant fallback) ─────────────────────
+    lending = fetch_lending_lead_sync()
+    yield_rec = lending["protocol"]
+    print(f"  🏦 Lending lead: {yield_rec}  TVL ${lending['tvl']:,.0f}")
 
     # ── Entry decision ────────────────────────────────────────────────────────
     entry_signal=(sig.get("entry_signal",False) and
@@ -170,12 +215,14 @@ def run_monitor():
     if entry_signal:
         sizing=compute_position_size(signal_score=signal_score,verbose=False)
         decision="ENTRY SIGNAL"
+        fng_line=f"F&G: {fng_v} ({fng_cls}) → {fng_bias.lower().replace('_',' ')} bias"
         msg=(f"⚡ *ENTRY SIGNAL — Strategy C*\n"
              f"Score: {signal_score}/100 ({score_result['grade'][:1]})\n"
              f"z_bridge={z_b:.4f} z_stable={z_s:.4f}\n"
              f"r={r:.4f} p={p:.4f}\n"
              f"Position size: ${sizing['position_usd']:.2f}\n"
              f"ARB: ${arb_price:.4f}\n"
+             f"{fng_line}\n"
              f"→ Run `trade_executor.py` before MetaMask")
         print(f"  ⚡ ENTRY SIGNAL  score={signal_score}  z={z_b:.4f}  r={r:.4f}")
         send_telegram(msg)
@@ -189,11 +236,13 @@ def run_monitor():
         if not cb["all_clear"]: reasons.append(f"circuit breaker: {','.join(cb['triggered'])}")
         print(f"  ⏸ PARKED  [{' | '.join(reasons) if reasons else 'no signal'}]")
         if TELEGRAM_BOT_TOKEN:
+            fng_line=f"F&G: {fng_v} ({fng_cls}) → {fng_bias.lower().replace('_',' ')} bias"
             send_telegram(f"📊 *Daily Monitor {now.strftime('%Y-%m-%d')}*\n"
                          f"PARKED | score={signal_score} z={z_b:.4f} r={r:.4f}\n"
-                         f"ARB ${arb_price:.4f} | Yield→{yield_rec}")
+                         f"ARB ${arb_price:.4f} | Yield→{yield_rec}\n"
+                         f"{fng_line}")
 
-    log_signal(ts,z_b,z_s,r,p,cv,signal_score,entry_signal,decision)
+    log_signal(ts,z_b,r,p,cv,entry_signal,decision,fng_v,fng_bias)
     print(f"  📝 Logged to {LOG_FILE}")
 
 if __name__=="__main__":
