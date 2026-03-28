@@ -10,12 +10,13 @@ Critical upgrades:
   ✅ Dual-source bridge signal validation
 """
 
+import asyncio
 import json
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
-from web3 import Web3
+from web3 import Web3, AsyncWeb3
 
 from flashloan_check  import run_flashloan_surface_check
 from rugpull_check    import run_rugpull_check
@@ -61,45 +62,46 @@ _V3_POOL_ABI = [
 _DECIMALS_DIFF = 18 - 6  # ARB(18) − USDC(6) = 12
 
 
-def estimate_v3_slippage(position_size_usd: float) -> tuple[float, str]:
-    """Estimate slippage via Uniswap V3 ARB/USDC tick-based liquidity model.
+async def get_dynamic_slippage(position_size_usd: float) -> tuple[float, str]:
+    """Async V3 tick-based slippage using AsyncWeb3 + asyncio.gather.
 
-    Queries on-chain: slot0() → sqrtPriceX96, liquidity() → active L.
-    Computes:  Δprice = Δtoken / L   (per system-prompt §2).
+    Queries slot0() and liquidity() in parallel from the ARB/USDC pool.
+    Computes quadratic price impact:  Δprice = (√P + Δy/L)² − (√P)²
+    per system-prompt §2: "Δprice = Δtoken / L per tick crossed."
 
     Returns (slippage_pct, method):
         method = "tick-based" | "fallback"
-        0.05 ≤ slippage_pct ≤ 2.0;  fallback = 0.15 on RPC failure.
+        0.05 ≤ slippage_pct ≤ 2.0;  fallback = 0.15% on RPC failure.
     """
+    w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(ARB_RPC))
     try:
-        w3 = Web3(Web3.HTTPProvider(ARB_RPC))
-        if not w3.is_connected():
-            return 0.15, "fallback"
-
         pool = w3.eth.contract(
             address=Web3.to_checksum_address(ARB_USDC_V3_POOL),
             abi=_V3_POOL_ABI,
         )
 
-        slot0 = pool.functions.slot0().call()
+        # Parallel RPC calls — slot0 + liquidity simultaneously
+        slot0, L = await asyncio.gather(
+            pool.functions.slot0().call(),
+            pool.functions.liquidity().call(),
+        )
+
         sqrt_price_x96: int = slot0[0]
-        L: int = pool.functions.liquidity().call()
 
         if L == 0 or sqrt_price_x96 == 0:
             return 0.15, "fallback"
 
         # ── Current price ─────────────────────────────────────────────────
         # sqrtPriceX96 = sqrt(price_raw) × 2^96
-        # price_raw  = (sqrtPriceX96 / 2^96)²   (USDC_raw per ARB_raw)
-        # price_human = price_raw × 10^12        (USDC per ARB)
+        # price_human = (sqrtPriceX96 / 2^96)² × 10^decimals_diff
         sqrt_price = sqrt_price_x96 / (2**96)
         current_price = (sqrt_price**2) * (10**_DECIMALS_DIFF)
 
         if current_price <= 0:
             return 0.15, "fallback"
 
-        # ── Single-tick slippage approximation ────────────────────────────
-        # Buying ARB with USDC: push token1 (USDC) into pool
+        # ── Quadratic price impact ────────────────────────────────────────
+        # Buying ARB with USDC: push Δy token1 (USDC) into pool
         # Δ(sqrtPrice) = Δy_raw / L   where Δy_raw = position_usd × 10^6
         delta_y = position_size_usd * (10**6)
         delta_sqrt_price = delta_y / L
@@ -113,8 +115,14 @@ def estimate_v3_slippage(position_size_usd: float) -> tuple[float, str]:
         slippage_pct = max(0.05, min(2.0, slippage_pct))
         return round(slippage_pct, 4), "tick-based"
 
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Slippage RPC failed: {e}. Falling back to 0.15%")
         return 0.15, "fallback"
+
+
+def estimate_v3_slippage(position_size_usd: float) -> tuple[float, str]:
+    """Sync wrapper — runs get_dynamic_slippage for non-async callers."""
+    return asyncio.run(get_dynamic_slippage(position_size_usd))
 
 def _rpc(url,method,params):
     try:
